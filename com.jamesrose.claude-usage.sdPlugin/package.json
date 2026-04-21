@@ -1,0 +1,18 @@
+{
+	"name": "com.jamesrose.claude-usage",
+	"version": "1.0.0",
+	"description": "Stream Deck plugin showing Claude Max usage percentages",
+	"main": "dist/plugin.js",
+	"type": "module",
+	"scripts": {
+		"build": "tsc",
+		"watch": "tsc --watch"
+	},
+	"dependencies": {
+		"@elgato/streamdeck": "^2.0.0"
+	},
+	"devDependencies": {
+		"typescript": "^5.5.0",
+		"@types/node": "^20.0.0"
+	}
+}

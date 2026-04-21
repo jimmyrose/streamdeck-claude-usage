@@ -1,0 +1,36 @@
+{
+	"$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+	"UUID": "com.jamesrose.claude-usage",
+	"Version": "1.0.0",
+	"Name": "Claude Usage",
+	"Description": "Shows Claude Max usage percentage (5h session + 7d weekly)",
+	"Author": "James Rose",
+	"Icon": "imgs/plugin-icon",
+	"CodePath": "dist/plugin.js",
+	"OS": [
+		{
+			"Platform": "windows",
+			"MinimumVersion": "10"
+		}
+	],
+	"Software": {
+		"MinimumVersion": "6.6"
+	},
+	"Nodejs": {
+		"Version": "20",
+		"Debug": "enabled"
+	},
+	"SDKVersion": 2,
+	"Actions": [
+		{
+			"UUID": "com.jamesrose.claude-usage.display",
+			"Name": "Claude Usage",
+			"Icon": "imgs/action-icon",
+			"States": [
+				{
+					"Image": "imgs/action-icon"
+				}
+			]
+		}
+	]
+}
