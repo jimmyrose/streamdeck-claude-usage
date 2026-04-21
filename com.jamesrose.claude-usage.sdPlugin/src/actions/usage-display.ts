@@ -11,7 +11,7 @@ interface UsageResponse {
 @action({ UUID: "com.jamesrose.claude-usage.display" })
 export class UsageDisplayAction extends SingletonAction {
 	private timer: ReturnType<typeof setInterval> | null = null;
-	private readonly POLL_INTERVAL = 120_000;
+	private readonly POLL_INTERVAL = 30_000;
 
 	override onWillAppear(ev: WillAppearEvent): void {
 		this.update(ev.action as unknown as KeyAction);
