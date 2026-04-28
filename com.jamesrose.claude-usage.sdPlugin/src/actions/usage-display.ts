@@ -43,6 +43,8 @@ function renderButton(line1: string, line2: string, line3: string, bgColour: str
 export class UsageDisplayAction extends SingletonAction {
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private readonly POLL_INTERVAL = 30_000;
+	private consecutiveFailures = 0;
+	private lastImage: string | null = null;
 
 	override onWillAppear(ev: WillAppearEvent): void {
 		if (this.timer) clearInterval(this.timer);
@@ -85,14 +87,19 @@ export class UsageDisplayAction extends SingletonAction {
 				: "#27ae60";
 
 			const resetTime = this.formatResetTime(usage.five_hour.resets_at);
-			const img = renderButton(`5h: ${fiveHr}%`, `7d: ${sevenDay}%`, resetTime, colour);
-			await action.setImage(`data:image/png;base64,${img}`);
+			const img = `data:image/png;base64,${renderButton(`5h: ${fiveHr}%`, `7d: ${sevenDay}%`, resetTime, colour)}`;
+			this.lastImage = img;
+			this.consecutiveFailures = 0;
+			await action.setImage(img);
 			await action.setTitle("");
 		} catch (e) {
-			streamDeck.logger.error("Update failed", e);
-			const img = renderButton("Error", "", "", "#666666");
-			await action.setImage(`data:image/png;base64,${img}`);
-			await action.setTitle("");
+			this.consecutiveFailures++;
+			streamDeck.logger.error(`Update failed (${this.consecutiveFailures} in a row)`, e);
+			if (this.consecutiveFailures >= 2 || !this.lastImage) {
+				const img = renderButton("Error", "", "", "#666666");
+				await action.setImage(`data:image/png;base64,${img}`);
+				await action.setTitle("");
+			}
 		}
 	}
 
