@@ -32,7 +32,8 @@
 			"Icon": "imgs/action-icon",
 			"States": [
 				{
-					"Image": "imgs/action-icon"
+					"Image": "imgs/action-icon",
+					"TitleAlignment": "middle"
 				}
 			]
 		}

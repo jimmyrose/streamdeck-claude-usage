@@ -1,4 +1,5 @@
-import { action, SingletonAction, type WillAppearEvent, type WillDisappearEvent, type KeyDownEvent, type KeyAction } from "@elgato/streamdeck";
+import streamDeck, { action, SingletonAction, type WillAppearEvent, type WillDisappearEvent, type KeyDownEvent } from "@elgato/streamdeck";
+import { createCanvas } from "@napi-rs/canvas";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -8,16 +9,47 @@ interface UsageResponse {
 	seven_day: { utilization: number; resets_at: string | null };
 }
 
+const SIZE = 144;
+
+function renderButton(line1: string, line2: string, line3: string, bgColour: string): string {
+	const canvas = createCanvas(SIZE, SIZE);
+	const ctx = canvas.getContext("2d");
+
+	ctx.fillStyle = bgColour;
+	ctx.beginPath();
+	ctx.roundRect(0, 0, SIZE, SIZE, 12);
+	ctx.fill();
+
+	ctx.textAlign = "center";
+	ctx.textBaseline = "middle";
+	ctx.fillStyle = "#ffffff";
+	ctx.font = "bold 24px Arial";
+
+	if (line3) {
+		ctx.fillText(line1, SIZE / 2, 36);
+		ctx.fillText(line2, SIZE / 2, 72);
+		ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+		ctx.font = "22px Arial";
+		ctx.fillText(line3, SIZE / 2, 112);
+	} else {
+		ctx.fillText(line1, SIZE / 2, 52);
+		ctx.fillText(line2, SIZE / 2, 88);
+	}
+
+	return canvas.toBuffer("image/png").toString("base64");
+}
+
 @action({ UUID: "com.jamesrose.claude-usage.display" })
 export class UsageDisplayAction extends SingletonAction {
 	private timer: ReturnType<typeof setInterval> | null = null;
 	private readonly POLL_INTERVAL = 30_000;
 
 	override onWillAppear(ev: WillAppearEvent): void {
-		this.update(ev.action as unknown as KeyAction);
+		if (this.timer) clearInterval(this.timer);
+		this.update(ev.action);
 		this.timer = setInterval(() => {
 			for (const a of this.actions) {
-				this.update(a as unknown as KeyAction);
+				this.update(a);
 			}
 		}, this.POLL_INTERVAL);
 	}
@@ -30,14 +62,16 @@ export class UsageDisplayAction extends SingletonAction {
 	}
 
 	override onKeyDown(ev: KeyDownEvent): void {
-		this.update(ev.action as unknown as KeyAction);
+		this.update(ev.action);
 	}
 
-	private async update(action: KeyAction): Promise<void> {
+	private async update(action: { setImage(image: string): Promise<void>; setTitle(title: string): Promise<void> }): Promise<void> {
 		try {
 			const token = this.getToken();
 			if (!token) {
-				await this.render(action, "Refresh", "Claude", "#666666");
+				const img = renderButton("Refresh", "Claude", "", "#666666");
+				await action.setImage(`data:image/png;base64,${img}`);
+				await action.setTitle("");
 				return;
 			}
 
@@ -50,9 +84,15 @@ export class UsageDisplayAction extends SingletonAction {
 				: maxUtil >= 50 ? "#f39c12"
 				: "#27ae60";
 
-			await this.render(action, `5h: ${fiveHr}%`, `7d: ${sevenDay}%`, colour);
-		} catch {
-			await this.render(action, "Error", "", "#666666");
+			const resetTime = this.formatResetTime(usage.five_hour.resets_at);
+			const img = renderButton(`5h: ${fiveHr}%`, `7d: ${sevenDay}%`, resetTime, colour);
+			await action.setImage(`data:image/png;base64,${img}`);
+			await action.setTitle("");
+		} catch (e) {
+			streamDeck.logger.error("Update failed", e);
+			const img = renderButton("Error", "", "", "#666666");
+			await action.setImage(`data:image/png;base64,${img}`);
+			await action.setTitle("");
 		}
 	}
 
@@ -79,17 +119,14 @@ export class UsageDisplayAction extends SingletonAction {
 		return res.json() as Promise<UsageResponse>;
 	}
 
-	private async render(action: KeyAction, line1: string, line2: string, bgColour: string): Promise<void> {
-		const svg = [
-			`<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144">`,
-			`<rect width="144" height="144" rx="12" fill="${bgColour}"/>`,
-			`<text x="72" y="62" text-anchor="middle" fill="white" font-size="24" font-family="Arial, sans-serif" font-weight="bold">${line1}</text>`,
-			`<text x="72" y="98" text-anchor="middle" fill="white" font-size="24" font-family="Arial, sans-serif" font-weight="bold">${line2}</text>`,
-			`</svg>`
-		].join("");
-
-		const base64 = Buffer.from(svg).toString("base64");
-		await action.setImage(`data:image/svg+xml;base64,${base64}`);
-		await action.setTitle("");
+	private formatResetTime(resetsAt: string | null): string {
+		if (!resetsAt) return "";
+		const reset = new Date(resetsAt);
+		const hrs = reset.getHours();
+		const mins = reset.getMinutes();
+		const ampm = hrs >= 12 ? "pm" : "am";
+		const h = hrs % 12 || 12;
+		const m = mins.toString().padStart(2, "0");
+		return `@ ${h}:${m}${ampm}`;
 	}
 }
