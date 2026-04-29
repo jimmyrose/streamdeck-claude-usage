@@ -10,6 +10,8 @@ interface UsageResponse {
 }
 
 const SIZE = 144;
+const BASE_INTERVAL = 30_000;
+const MAX_INTERVAL = 300_000;
 
 function renderButton(line1: string, line2: string, line3: string, bgColour: string): string {
 	const canvas = createCanvas(SIZE, SIZE);
@@ -41,30 +43,44 @@ function renderButton(line1: string, line2: string, line3: string, bgColour: str
 
 @action({ UUID: "com.jamesrose.claude-usage.display" })
 export class UsageDisplayAction extends SingletonAction {
-	private timer: ReturnType<typeof setInterval> | null = null;
-	private readonly POLL_INTERVAL = 30_000;
+	private timer: ReturnType<typeof setTimeout> | null = null;
 	private consecutiveFailures = 0;
 	private lastLines: { line1: string; line2: string; line3: string } | null = null;
+	private currentInterval = BASE_INTERVAL;
 
 	override onWillAppear(ev: WillAppearEvent): void {
-		if (this.timer) clearInterval(this.timer);
+		this.stopTimer();
 		this.update(ev.action);
-		this.timer = setInterval(() => {
-			for (const a of this.actions) {
-				this.update(a);
-			}
-		}, this.POLL_INTERVAL);
+		this.scheduleNext();
 	}
 
 	override onWillDisappear(_ev: WillDisappearEvent): void {
+		this.stopTimer();
+	}
+
+	override onKeyDown(ev: KeyDownEvent): void {
+		this.consecutiveFailures = 0;
+		this.currentInterval = BASE_INTERVAL;
+		this.stopTimer();
+		this.update(ev.action);
+		this.scheduleNext();
+	}
+
+	private stopTimer(): void {
 		if (this.timer) {
-			clearInterval(this.timer);
+			clearTimeout(this.timer);
 			this.timer = null;
 		}
 	}
 
-	override onKeyDown(ev: KeyDownEvent): void {
-		this.update(ev.action);
+	private scheduleNext(): void {
+		this.stopTimer();
+		this.timer = setTimeout(async () => {
+			for (const a of this.actions) {
+				await this.update(a);
+			}
+			this.scheduleNext();
+		}, this.currentInterval);
 	}
 
 	private async update(action: { setImage(image: string): Promise<void>; setTitle(title: string): Promise<void> }): Promise<void> {
@@ -89,12 +105,15 @@ export class UsageDisplayAction extends SingletonAction {
 			const resetTime = this.formatResetTime(usage.five_hour.resets_at);
 			this.lastLines = { line1: `5h: ${fiveHr}%`, line2: `7d: ${sevenDay}%`, line3: resetTime };
 			this.consecutiveFailures = 0;
+			this.currentInterval = BASE_INTERVAL;
 			const img = renderButton(this.lastLines.line1, this.lastLines.line2, this.lastLines.line3, colour);
 			await action.setImage(`data:image/png;base64,${img}`);
 			await action.setTitle("");
 		} catch (e) {
 			this.consecutiveFailures++;
-			streamDeck.logger.error(`Update failed (${this.consecutiveFailures} in a row)`, e);
+			this.currentInterval = Math.min(BASE_INTERVAL * Math.pow(2, this.consecutiveFailures), MAX_INTERVAL);
+			streamDeck.logger.error(`Update failed (${this.consecutiveFailures}x, next in ${Math.round(this.currentInterval / 1000)}s)`, e);
+
 			if (this.consecutiveFailures >= 5) {
 				const img = renderButton("Error", "", "", "#666666");
 				await action.setImage(`data:image/png;base64,${img}`);
