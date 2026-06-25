@@ -1,6 +1,6 @@
 import streamDeck, { action, SingletonAction, type WillAppearEvent, type WillDisappearEvent, type KeyDownEvent } from "@elgato/streamdeck";
 import { createCanvas } from "@napi-rs/canvas";
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -10,8 +10,15 @@ interface UsageResponse {
 }
 
 const SIZE = 144;
-const BASE_INTERVAL = 30_000;
-const MAX_INTERVAL = 300_000;
+// Usage barely moves minute-to-minute and the endpoint rate-limits hard, so poll
+// gently. On failure (the endpoint 429s constantly) back off exponentially up to
+// 30 min; reset to base on any success or a manual button press.
+const BASE_INTERVAL = 120_000;   // 2 min
+const MAX_INTERVAL = 1_800_000;  // 30 min
+const STALE_CEILING = 360_000;   // hold last-good numbers for up to 6 min before greying
+// Shared with the /claude-usage skill: every successful poll writes the last-good
+// reading here so the skill can read usage without hitting the rate-limited API.
+const CACHE_PATH = join(homedir(), ".claude", "usage-cache.json");
 
 function renderButton(line1: string, line2: string, line3: string, bgColour: string): string {
 	const canvas = createCanvas(SIZE, SIZE);
@@ -44,12 +51,14 @@ function renderButton(line1: string, line2: string, line3: string, bgColour: str
 @action({ UUID: "com.jamesrose.claude-usage.display" })
 export class UsageDisplayAction extends SingletonAction {
 	private timer: ReturnType<typeof setTimeout> | null = null;
-	private consecutiveFailures = 0;
 	private lastLines: { line1: string; line2: string; line3: string } | null = null;
+	private lastColour: string | null = null;
+	private lastGoodAt = 0;
 	private currentInterval = BASE_INTERVAL;
 
 	override onWillAppear(ev: WillAppearEvent): void {
 		this.stopTimer();
+		this.currentInterval = BASE_INTERVAL;
 		this.update(ev.action);
 		this.scheduleNext();
 	}
@@ -59,9 +68,8 @@ export class UsageDisplayAction extends SingletonAction {
 	}
 
 	override onKeyDown(ev: KeyDownEvent): void {
-		this.consecutiveFailures = 0;
-		this.currentInterval = BASE_INTERVAL;
 		this.stopTimer();
+		this.currentInterval = BASE_INTERVAL; // manual press = retry now, reset backoff
 		this.update(ev.action);
 		this.scheduleNext();
 	}
@@ -76,21 +84,27 @@ export class UsageDisplayAction extends SingletonAction {
 	private scheduleNext(): void {
 		this.stopTimer();
 		this.timer = setTimeout(async () => {
+			let anyOk = false;
 			for (const a of this.actions) {
-				await this.update(a);
+				anyOk = (await this.update(a)) || anyOk;
 			}
+			// Success returns to the steady cadence; a failed round backs off so we
+			// stop hammering a rate-limited endpoint.
+			this.currentInterval = anyOk
+				? BASE_INTERVAL
+				: Math.min(this.currentInterval * 2, MAX_INTERVAL);
 			this.scheduleNext();
 		}, this.currentInterval);
 	}
 
-	private async update(action: { setImage(image: string): Promise<void>; setTitle(title: string): Promise<void> }): Promise<void> {
+	private async update(action: { setImage(image: string): Promise<void>; setTitle(title: string): Promise<void> }): Promise<boolean> {
 		try {
 			const token = this.getToken();
 			if (!token) {
 				const img = renderButton("Refresh", "Claude", "", "#666666");
 				await action.setImage(`data:image/png;base64,${img}`);
 				await action.setTitle("");
-				return;
+				return false;
 			}
 
 			const usage = await this.fetchUsage(token);
@@ -104,26 +118,44 @@ export class UsageDisplayAction extends SingletonAction {
 
 			const resetTime = this.formatResetTime(usage.five_hour.resets_at);
 			this.lastLines = { line1: `5h: ${fiveHr}%`, line2: `7d: ${sevenDay}%`, line3: resetTime };
-			this.consecutiveFailures = 0;
-			this.currentInterval = BASE_INTERVAL;
+			this.lastColour = colour;
+			this.lastGoodAt = Date.now();
+			this.writeCache(usage);
 			const img = renderButton(this.lastLines.line1, this.lastLines.line2, this.lastLines.line3, colour);
 			await action.setImage(`data:image/png;base64,${img}`);
 			await action.setTitle("");
+			return true;
 		} catch (e) {
-			this.consecutiveFailures++;
-			this.currentInterval = Math.min(BASE_INTERVAL * Math.pow(2, this.consecutiveFailures), MAX_INTERVAL);
-			streamDeck.logger.error(`Update failed (${this.consecutiveFailures}x, next in ${Math.round(this.currentInterval / 1000)}s)`, e);
+			// 429s are constant on this endpoint and don't cost quota; we just keep
+			// retrying at the steady interval. Hold the last good colour while the
+			// displayed numbers are still fresh enough to trust, then go grey so a
+			// genuine outage (or being stale through a heavy burst) is obvious.
+			const ageMs = Date.now() - this.lastGoodAt;
+			const fresh = this.lastLines !== null && ageMs < STALE_CEILING;
+			streamDeck.logger.error(`Update failed (last good ${this.lastGoodAt ? Math.round(ageMs / 1000) + "s ago" : "never"}, ${fresh ? "holding" : "grey"})`, e);
 
-			if (this.consecutiveFailures >= 5) {
-				const img = renderButton("Error", "", "", "#666666");
+			if (fresh) {
+				const img = renderButton(this.lastLines!.line1, this.lastLines!.line2, this.lastLines!.line3, this.lastColour!);
 				await action.setImage(`data:image/png;base64,${img}`);
-				await action.setTitle("");
-			} else if (this.consecutiveFailures >= 2) {
-				const { line1, line2, line3 } = this.lastLines ?? { line1: "Error", line2: "", line3: "" };
+			} else {
+				const { line1, line2, line3 } = this.lastLines ?? { line1: "Stale", line2: "", line3: "" };
 				const img = renderButton(line1, line2, line3, "#666666");
 				await action.setImage(`data:image/png;base64,${img}`);
-				await action.setTitle("");
 			}
+			await action.setTitle("");
+			return false;
+		}
+	}
+
+	private writeCache(usage: UsageResponse): void {
+		try {
+			writeFileSync(CACHE_PATH, JSON.stringify({
+				fetched_at: new Date().toISOString(),
+				five_hour: { utilization: usage.five_hour.utilization, resets_at: usage.five_hour.resets_at },
+				seven_day: { utilization: usage.seven_day.utilization, resets_at: usage.seven_day.resets_at },
+			}));
+		} catch {
+			// best-effort; never let a cache write break the display
 		}
 	}
 

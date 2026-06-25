@@ -6,7 +6,7 @@ An Elgato Stream Deck plugin that shows your [Claude](https://claude.ai) Max pla
 - **Amber**: 50-79% usage
 - **Red**: 80%+ usage
 
-Displays both 5-hour session and 7-day rolling usage, plus when the 5-hour window resets. Polls every 30 seconds. Press the button to refresh immediately.
+Displays both 5-hour session and 7-day rolling usage, plus when the 5-hour window resets. Polls every 2 minutes (the usage data barely moves faster than that, and the endpoint is heavily rate-limited). Press the button to refresh immediately.
 
 ![Stream Deck Claude Usage](docs/preview.png)
 
@@ -76,7 +76,17 @@ Quit and reopen the Stream Deck app, then drag the **Claude Usage** action onto 
 
 ## Error handling
 
-If the API call fails once, the button keeps showing the last successful reading. After two consecutive failures, it switches to a grey "Error" state. This prevents brief network blips from flashing the error screen.
+The usage endpoint returns HTTP 429 (rate limited) on a large share of requests. The plugin handles this with **exponential backoff**: when a poll fails it doubles the wait (2 min → 4 → 8 ... capped at 30 min) so it stops hammering the endpoint; any success (or a button press) resets it back to the 2-minute cadence. While polls are failing the button keeps showing the last good reading for up to 6 minutes, then goes grey so a genuine outage is obvious.
+
+## Usage cache (shared with the `/claude-usage` skill)
+
+On every successful poll the plugin writes its last-good reading to `~/.claude/usage-cache.json`:
+
+```json
+{ "fetched_at": "<ISO>", "five_hour": { "utilization": 47, "resets_at": "..." }, "seven_day": { "utilization": 22, "resets_at": "..." } }
+```
+
+This lets other tools (e.g. a CLI usage check that gates long-running work) read current usage from disk instead of each hammering the rate-limited API. The file is best-effort: a failed write never affects the display.
 
 ## Notes
 
